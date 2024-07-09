@@ -27,4 +27,4 @@ add_definitions(${LLVM_DEFINITIONS})
 add_executable(p4c-pie ${PIE_SRCS})
 
 message(STATUS "p4c lib: ${P4C_LIBRARIES}") 
-target_link_libraries (p4c-pie frontend ir ${llvm_libs} ${P4C_LIBRARIES} ${P4C_LIB_DEPS} pie_backend)
+target_link_libraries (p4c-pie frontend ir LLVM ${llvm_libs} ${P4C_LIBRARIES} ${P4C_LIB_DEPS} pie_backend)
