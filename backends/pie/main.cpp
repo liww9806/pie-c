@@ -1,9 +1,3 @@
-#pragma GCC diagnostic ignored "-Wunused-parameter" 
-#pragma GCC diagnostic ignored "-Wunused-function" 
-#pragma GCC diagnostic ignored "-Wunused-variable" 
-#pragma GCC diagnostic ignored "-Wunused-label" 
-#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
-
 #include <stdio.h>
 #include <string>
 #include <iostream>
@@ -22,15 +16,6 @@
 #include "frontends/common/model.h"
 #include "frontends/p4/coreLibrary.h"
 #include "midend/convertEnums.h"
-
-#include <llvm/IR/IRBuilder.h>
-#include <llvm/ExecutionEngine/ExecutionEngine.h>
-#include <llvm/ExecutionEngine/GenericValue.h>
-#include <llvm/IR/LLVMContext.h>
-#include <llvm/IR/Module.h>
-#include <llvm/Support/TargetSelect.h>
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/Support/FileSystem.h"
 
 #include "frontends/common/options.h"
 #include "frontends/p4/evaluator/evaluator.h"
@@ -78,24 +63,7 @@ using BMV2Context = P4CContextWithOptions<BMV2Options>;
 int main(int argc, char** argv) {
     setup_gc_logging();
 
-    llvm::LLVMContext context;
-    llvm::Module module("hello_world_module", context);
-    llvm::IRBuilder<> builder(context);
- 
-    // 创建一个函数，返回类型为void
-    llvm::FunctionType *functionType = llvm::FunctionType::get(llvm::Type::getVoidTy(context), false);
-    llvm::Function *helloFunction = llvm::Function::Create(functionType, llvm::Function::ExternalLinkage, "main", &module);
- 
-    // 创建基本块
-    llvm::BasicBlock *entryBlock = llvm::BasicBlock::Create(context, "entry", helloFunction);
-    builder.SetInsertPoint(entryBlock);
- 
-    // 打印"Hello World!"
-    functionType = llvm::FunctionType::get(llvm::Type::getInt32Ty(context), false);
-    llvm::Function *printfFunction = llvm::Function::Create(functionType, llvm::Function::ExternalLinkage, "printf", &module);
-    builder.CreateCall(printfFunction, builder.CreateGlobalStringPtr("Hello pie!\n"));
-
-    
+    pie::PieIrBuilder builder;
 
     AutoCompileContext autoBMV2Context(new pie::BMV2Context);
     auto& options = pie::BMV2Context::get().options();
@@ -136,42 +104,20 @@ int main(int argc, char** argv) {
     }
     if (::errorCount() > 0)
         return 1;
-    pie::PieParser parser(context, module, builder);
-    parser.printfFunction = printfFunction;
-    toplevel->getProgram()->apply(parser);  
- 
-    // 返回
-    builder.CreateRetVoid();
- 
-    // // 初始化JIT
-    // llvm::InitializeNativeTarget();
-    // llvm::InitializeNativeTargetAsmPrinter();
-    // llvm::ExecutionEngine *engine = llvm::EngineBuilder(module).create();
- 
-    // // 获取函数指针并调用
-    // typedef void (*HelloFunc)();
-    // std::string errorMsg;
-    // HelloFunc helloFunc = (HelloFunc)engine->getPointerToFunction(helloFunction, &errorMsg);
-    // if (helloFunc) {
-    //     helloFunc();
-    // } else {
-    //     std::cerr << "Error: " << errorMsg << std::endl;
-    // }
- 
+    
+    pie::PieParser parser(builder);
+    toplevel->getProgram()->apply(parser);
+    builder.finish();
+  
     // delete engine;
-    std::error_code ErrorInfo;
-    llvm::raw_fd_ostream Out("hello.ll", ErrorInfo, llvm::sys::fs::OF_None);
-    if (ErrorInfo) {
-        // 处理错误信息
+    auto ret = builder.output("hello.ll");
+    if (ret != 0) {
+        fprintf(stderr, "failed to output to '%s'\n", "hello.ll");
         return -1;
     }
- 
-    // 写入IR到文件
-    module.print(Out, nullptr);
-    Out.close();
 
     auto cmd = "llc -filetype=obj --relocation-model=pic -o hello.o hello.ll";
-    int ret = system(cmd);
+    ret = system(cmd);
     if (ret != 0) {
         fprintf(stderr, "failed to exec '%s'\n", cmd);
         return -1;

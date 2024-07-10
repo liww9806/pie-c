@@ -2,10 +2,14 @@ set (PIE_SRCS main.cpp)
 add_cpplint_files (${CMAKE_CURRENT_SOURCE_DIR} "${PIE_SRCS}")
 
 set (PIE_BACKEND_SRCS
+    backend.h
+    backend.cpp
     control.h
     control.cpp
     deparser.h
     deparser.cpp
+    llvm-ir.h
+    llvm-ir.cpp
     parser.h
     parser.cpp
 )

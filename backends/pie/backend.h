@@ -5,15 +5,19 @@
 #include "lib/json.h"
 #include "frontends/p4/typeMap.h"
 #include "frontends/common/resolveReferences/referenceMap.h"
-#include "llvm-ir.h"
 
 namespace pie {
 
 class PieParser : public Inspector
 {
  public:
-    PieParser(PieIrBuilder& builder)
-        : builder(builder) {}
+    llvm::Function *printfFunction = nullptr;
+    PieParser(llvm::LLVMContext& context,
+        llvm::Module& module,
+        llvm::IRBuilder<>& builder)
+        : context(context)
+        , module(module)
+        , builder(builder) {}
 
     bool preorder(const IR::ParserState* state) override
     {
@@ -22,11 +26,13 @@ class PieParser : public Inspector
         cstring msg("    the parser found a state: ");
         msg += name;
         msg += "\n";
-        builder.add_print(msg.c_str());
+        builder.CreateCall(printfFunction, builder.CreateGlobalStringPtr(msg.c_str()));
         return false;
     }
  private:
-    pie::PieIrBuilder& builder;
+    llvm::LLVMContext& context;
+    llvm::Module& module;
+    llvm::IRBuilder<>& builder;
     P4::ReferenceMap*    refMap = nullptr;
     P4::TypeMap*         typeMap = nullptr;
 };
