@@ -1,42 +1,197 @@
-#ifndef __BACKENDS_PIE_PARSER_H__
-#define __BACKENDS_PIE_PARSER_H__
+/*
+Copyright 2013-present Barefoot Networks, Inc.
 
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+#ifndef BACKENDS_PIE_BACKEND_H_
+#define BACKENDS_PIE_BACKEND_H_
+
+#include "frontends/common/model.h"
+#include "frontends/p4/coreLibrary.h"
 #include "ir/ir.h"
+#include "lib/cstring.h"
+#include "lib/error.h"
+#include "lib/exceptions.h"
+#include "lib/gc.h"
 #include "lib/json.h"
-#include "frontends/p4/typeMap.h"
-#include "frontends/common/resolveReferences/referenceMap.h"
+#include "lib/log.h"
+#include "lib/nullstream.h"
+#include "midend/actionSynthesis.h"
+#include "midend/convertEnums.h"
+#include "midend/removeComplexExpressions.h"
+#include "midend/removeLeftSlices.h"
+#include "options.h"
+
+using namespace P4::literals;
 
 namespace pie {
 
-class PieParser : public Inspector
-{
- public:
-    llvm::Function *printfFunction = nullptr;
-    PieParser(llvm::LLVMContext& context,
-        llvm::Module& module,
-        llvm::IRBuilder<>& builder)
-        : context(context)
-        , module(module)
-        , builder(builder) {}
+enum gress_t { INGRESS, EGRESS };
 
-    bool preorder(const IR::ParserState* state) override
-    {
-        auto name = state->name.name.c_str();
-        printf("visit state: %s\n", name);
-        cstring msg("    the parser found a state: ");
-        msg += name;
-        msg += "\n";
-        builder.CreateCall(printfFunction, builder.CreateGlobalStringPtr(msg.c_str()));
+enum block_t {
+    PARSER,
+    PIPELINE,
+    DEPARSER,
+    V1_PARSER,
+    V1_DEPARSER,
+    V1_INGRESS,
+    V1_EGRESS,
+    V1_VERIFY,
+    V1_COMPUTE
+};
+
+class ExpressionConverter;
+
+/// Backend is a the base class for SimpleSwitchBackend and PortableSwitchBackend.
+class Backend {
+ public:
+    PIEOptions &options;
+    P4::ReferenceMap *refMap;
+    P4::TypeMap *typeMap;
+    P4::ConvertEnums::EnumMapping *enumMap;
+    P4::P4CoreLibrary &corelib;
+    // pie::JsonObjects *json;
+    const IR::ToplevelBlock *toplevel = nullptr;
+
+ public:
+    Backend(PIEOptions &options, P4::ReferenceMap *refMap, P4::TypeMap *typeMap,
+            P4::ConvertEnums::EnumMapping *enumMap)
+        : options(options),
+          refMap(refMap),
+          typeMap(typeMap),
+          enumMap(enumMap),
+          corelib(P4::P4CoreLibrary::instance())
+          /*json(new pie::JsonObjects())*/ {
+        refMap->setIsV1(options.isv1());
+    }
+    void serialize(std::ostream &out) const { (void)out; /* json->toplevel->serialize(out); */ }
+    virtual void convert(const IR::ToplevelBlock *block) = 0;
+};
+
+/// This class implements a policy suitable for the SynthesizeActions pass.
+// The policy is: do not synthesize actions for the controls whose names
+/// are in the specified set.
+/// For example, we expect that the code in the deparser will not use any
+/// tables or actions.
+class SkipControls : public P4::ActionSynthesisPolicy {
+    /// set of controls where actions are not synthesized
+    const std::set<cstring> *skip;
+
+ public:
+    explicit SkipControls(const std::set<cstring> *skip) : skip(skip) { CHECK_NULL(skip); }
+    bool convert(const Visitor::Context *, const IR::P4Control *control) override {
+        if (skip->find(control->name) != skip->end()) return false;
+        return true;
+    }
+};
+
+/// This class implements a policy suitable for the RemoveComplexExpression pass.
+/// The policy is: only remove complex expression for the controls whose names
+/// are in the specified set.
+/// For example, we expect that the code in ingress and egress will have complex
+/// expression removed.
+class ProcessControls : public P4::RemoveComplexExpressionsPolicy {
+    const std::set<cstring> *process;
+
+ public:
+    explicit ProcessControls(const std::set<cstring> *process) : process(process) {
+        CHECK_NULL(process);
+    }
+    bool convert(const IR::P4Control *control) const {
+        if (process->find(control->name) != process->end()) return true;
         return false;
     }
- private:
-    llvm::LLVMContext& context;
-    llvm::Module& module;
-    llvm::IRBuilder<>& builder;
-    P4::ReferenceMap*    refMap = nullptr;
-    P4::TypeMap*         typeMap = nullptr;
+};
+
+/// This pass adds @name annotations to all fields of the user metadata
+/// structure so that they do not clash with fields of the headers
+/// structure.  This is necessary because both of them become global
+/// objects in the output json.
+class RenameUserMetadata : public Transform {
+    P4::ReferenceMap *refMap;
+    const IR::Type_Struct *userMetaType;
+    /// Used as a prefix for the fields of the userMetadata structure
+    /// and also as a name for the userMetadata type clone.
+    cstring namePrefix;
+    bool renamed = false;
+
+ public:
+    RenameUserMetadata(P4::ReferenceMap *refMap, const IR::Type_Struct *userMetaType,
+                       cstring namePrefix)
+        : refMap(refMap), userMetaType(userMetaType), namePrefix(namePrefix) {
+        setName("RenameUserMetadata");
+        CHECK_NULL(refMap);
+        visitDagOnce = false;
+    }
+
+    const IR::Node *postorder(IR::Type_Struct *type) override {
+        // Clone the user metadata type
+        auto orig = getOriginal<IR::Type_Struct>();
+        if (userMetaType->name != orig->name) return type;
+
+        auto vec = new IR::IndexedVector<IR::Node>();
+        LOG2("Creating clone of " << orig);
+        renamed = true;
+        auto clone = type->clone();
+        clone->name = namePrefix;
+        vec->push_back(clone);
+
+        // Rename all fields
+        IR::IndexedVector<IR::StructField> fields;
+        for (auto f : type->fields) {
+            auto anno = f->getAnnotation(IR::Annotation::nameAnnotation);
+            cstring suffix = cstring::empty;
+            if (anno != nullptr) suffix = anno->getName();
+            if (suffix.startsWith(".")) {
+                // We can't change the name of this field.
+                // Hopefully the user knows what they are doing.
+                fields.push_back(f->clone());
+                continue;
+            }
+
+            if (!suffix.isNullOrEmpty())
+                suffix = "."_cs + suffix;
+            else
+                suffix = "."_cs + f->name;
+            cstring newName = namePrefix + suffix;
+            auto stringLit = new IR::StringLiteral(newName);
+            LOG2("Renaming " << f << " to " << newName);
+            auto annos = f->annotations->addOrReplace(IR::Annotation::nameAnnotation, stringLit);
+            auto field = new IR::StructField(f->srcInfo, f->name, annos, f->type);
+            fields.push_back(field);
+        }
+
+        auto annotated =
+            new IR::Type_Struct(type->srcInfo, type->name, type->annotations, std::move(fields));
+        vec->push_back(annotated);
+        return vec;
+    }
+
+    const IR::Node *preorder(IR::Type_Name *type) override {
+        // Find any reference to the user metadata type that is used and replace them
+        auto decl = refMap->getDeclaration(type->path);
+        if (decl == userMetaType)
+            type->path = new IR::Path(type->path->srcInfo, IR::ID(type->path->srcInfo, namePrefix));
+        LOG2("Replacing reference with " << type);
+        return type;
+    }
+
+    void end_apply(const IR::Node *) override {
+        BUG_CHECK(renamed, "Could not identify user metadata type declaration %1%", userMetaType);
+    }
 };
 
 }  // end of namespace pie
 
-#endif  // end of __BACKENDS_PIE_PARSER_H__
+#endif  // end of BACKENDS_PIE_BACKEND_H_

@@ -22,15 +22,15 @@ PieIrBuilder::PieIrBuilder()
     , module(*new llvm::Module("pie-module", context))
     , builder(*new llvm::IRBuilder<>(context))
 {
-    // 创建一个函数，返回类型为void
-    llvm::FunctionType *functionType = llvm::FunctionType::get(llvm::Type::getVoidTy(context), false);
+    // create a funtion, with void return type
+    llvm::FunctionType *functionType = llvm::FunctionType::get(llvm::Type::getInt32Ty(context), false);
     llvm::Function *helloFunction = llvm::Function::Create(functionType, llvm::Function::ExternalLinkage, "main", &module);
  
-    // 创建基本块
+    // create a basic block
     llvm::BasicBlock *entryBlock = llvm::BasicBlock::Create(context, "entry", helloFunction);
     builder.SetInsertPoint(entryBlock);
  
-    // 打印"Hello World!"
+    // print "Hello World!"
     functionType = llvm::FunctionType::get(llvm::Type::getInt32Ty(context), false);
     printfFunction = llvm::Function::Create(functionType, llvm::Function::ExternalLinkage, "printf", &module);
     builder.CreateCall(printfFunction, builder.CreateGlobalStringPtr("Hello pie!\n"));
@@ -38,9 +38,9 @@ PieIrBuilder::PieIrBuilder()
 
 void PieIrBuilder::finish()
 {
-    // 返回
+    // return
     finished = true;
-    builder.CreateRetVoid();
+    builder.CreateRet(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 0));
 }
 
 void PieIrBuilder::add_print(const char* msg)
@@ -55,10 +55,9 @@ int PieIrBuilder::output(const char* filename)
     std::error_code ErrorInfo;
     llvm::raw_fd_ostream Out(filename, ErrorInfo, llvm::sys::fs::OF_None);
     if (ErrorInfo) {
-        // 处理错误信息
         return -1;
     }
-    // 写入IR到文件
+    // write to IR file
     module.print(Out, nullptr);
     Out.close();
     return 0;
